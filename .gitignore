@@ -8,3 +8,5 @@
 /*.log
 /query_api_proxy.exe
 /query_api_proxy
+/.idea
+/*.iml
