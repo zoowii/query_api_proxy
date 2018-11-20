@@ -8,6 +8,8 @@ workers:
 
 request_timeout_seconds: 100
 
+response_when_got_result: false
+
 jsonrpc_query_methods:
   - hello
   - queryJson

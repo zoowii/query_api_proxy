@@ -29,6 +29,7 @@ func writeErrorToJSONRpcResponse(w http.ResponseWriter, id interface{}, errorCod
 	if err != nil {
 		w.Write([]byte(err.Error()))
 	} else {
+		w.Header().Set("Content-Type", "application/json")
 		w.Write(resBytes)
 	}
 }
@@ -38,6 +39,7 @@ func writeResultToJSONRpcResponse(w http.ResponseWriter, id interface{}, result 
 	if err != nil {
 		w.Write([]byte(err.Error()))
 	} else {
+		w.Header().Set("Content-Type", "application/json")
 		w.Write(resBytes)
 	}
 }
@@ -55,6 +57,7 @@ type WorkerResponse struct {
 }
 
 // TODO: use config's logpath to log file
+// TODO: use jsonrpcmethods whitelist if enabled
 func StartServer(config *Config) {
 	proxyHandlerFunc := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodPost {
@@ -100,6 +103,7 @@ func StartServer(config *Config) {
 						resultJSON, jsonErr := simplejson.NewJson(readBytes)
 						if jsonErr == nil {
 							res.ResultJSON = resultJSON
+							// TODO: digest result json and when got > 1/2 same results, just break the loop
 						}
 					}
 				}
@@ -107,6 +111,7 @@ func StartServer(config *Config) {
 			}(workerIndex, workerUri)
 		}
 		timeout := false
+		breakIterWorkerResponses := false
 		workerResponses := make([]*WorkerResponse, 0)
 		for i:=0;i<len(config.Workers);i++ {
 			if timeout {
@@ -115,8 +120,14 @@ func StartServer(config *Config) {
 			select {
 			case res := <-responsesChannel:
 				workerResponses = append(workerResponses, res)
+				if config.ResponseWhenFirstGotResult && res.ResultJSON != nil {
+					breakIterWorkerResponses = true
+				}
 			case <-time.After(time.Duration(config.RequestTimeoutSeconds) * time.Second):
 				timeout = true
+			}
+			if breakIterWorkerResponses {
+				break
 			}
 		}
 		// compare workerResponses to select most same responses
@@ -131,6 +142,15 @@ func StartServer(config *Config) {
 			ResultJSON *simplejson.Json
 			ResultBytes []byte
 			Count int
+		}
+		if config.ResponseWhenFirstGotResult && len(workerResponses) > 0 {
+			// find first not empty result json and final response
+			for _, workerRes := range workerResponses {
+				if workerRes.ResultJSON != nil {
+					writeDirectlyToResponse(w, workerRes.Result)
+					return
+				}
+			}
 		}
 		var sameWorkerResponseGroups = make(map[string]*WorkerResponseSameGroup, 0)
 		var maxCountGroup *WorkerResponseSameGroup = nil
@@ -176,19 +196,19 @@ func StartServer(config *Config) {
 		}
 		writeDirectlyToResponse(w, maxCountGroup.ResultBytes)
 	})
-	var logRequest = func (handler http.Handler) http.Handler {
-		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-			timer1 := time.NewTimer(time.Millisecond)
-			log.Printf("%s %s %s\n", r.RemoteAddr, r.Method, r.URL)
-			handler.ServeHTTP(w, r)
-			timer1.Stop()
-			usedTime := <- timer1.C
-			log.Printf("using %.2f seconds\n", (float64(usedTime.Nanosecond())*1.0/1000000000))
-		})
-	}
+	//var logRequest = func (handler http.Handler) http.Handler {
+	//	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	//		timer1 := time.NewTimer(time.Millisecond)
+	//		log.Printf("%s %s %s\n", r.RemoteAddr, r.Method, r.URL)
+	//		handler.ServeHTTP(w, r)
+	//		timer1.Stop()
+	//		usedTime := <- timer1.C
+	//		log.Printf("using %.2f seconds\n", (float64(usedTime.Nanosecond())*1.0/1000000000))
+	//	})
+	//}
 	s := &http.Server{
 		Addr:           fmt.Sprintf("%s:%d", config.Host, config.Port),
-		Handler:        logRequest(proxyHandlerFunc),
+		Handler:        proxyHandlerFunc, // logRequest(proxyHandlerFunc),
 		ReadTimeout:    50 * time.Second,
 		WriteTimeout:   100 * time.Second,
 		MaxHeaderBytes: 1 << 20,

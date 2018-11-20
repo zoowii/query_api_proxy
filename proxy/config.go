@@ -8,6 +8,9 @@ type Config struct {
 
 	Workers []string `yaml:"workers"`
 	JSONRpcQueryMethods []string `yaml:"jsonrpc_query_methods"`
+	OpenMethodsWhitelist bool `yaml:"open_methods_whitelist"`
+
+	ResponseWhenFirstGotResult bool `yaml:"response_when_got_result"`
 
 	LogPath string `yaml:"logpath"`
 }
