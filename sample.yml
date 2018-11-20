@@ -1,0 +1,15 @@
+host: 0.0.0.0
+port: 5000
+
+workers:
+  - 127.0.0.1:5001
+  - 127.0.0.1:5002
+  - 127.0.0.1:5003
+
+request_timeout_seconds: 100
+
+jsonrpc_query_methods:
+  - hello
+  - queryJson
+
+logpath: "./sample.log"
