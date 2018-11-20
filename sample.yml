@@ -2,13 +2,15 @@ host: 0.0.0.0
 port: 5000
 
 workers:
-  - http://127.0.0.1:50321/
-  - http://127.0.0.1:50321/
+  - http://127.0.0.1:5001/
+  - http://127.0.0.1:5002/
   - http://127.0.0.1:5003/
 
 request_timeout_seconds: 100
 
-response_when_got_result: false
+response_when_got_result: true
+
+cache_all_jsonrpc_methods: true
 
 jsonrpc_query_methods:
   - hello

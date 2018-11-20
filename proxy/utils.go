@@ -1,10 +1,11 @@
 package proxy
 
 import (
-	"encoding/json"
-	"github.com/bitly/go-simplejson"
 	"bytes"
+	"encoding/json"
 	"sort"
+
+	"github.com/bitly/go-simplejson"
 )
 
 const JSONRPC_PARSE_ERROR_CODE = -32700
@@ -100,4 +101,16 @@ func CompareJSONIsSame(a *simplejson.Json, b *simplejson.Json) bool {
 		return false
 	}
 	return DigestJSONForEqual(a) == DigestJSONForEqual(b)
+}
+
+func IsSuccessJSONRpcResponse(result *simplejson.Json) bool {
+	if result == nil {
+		return false
+	}
+	_, ok := result.CheckGet("error")
+	if ok {
+		return false
+	} else {
+		return true
+	}
 }

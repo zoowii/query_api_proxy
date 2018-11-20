@@ -10,3 +10,4 @@
 /query_api_proxy
 /.idea
 /*.iml
+/*.pyc

@@ -1,14 +1,17 @@
 package proxy
 
 import (
+	"bytes"
+	"fmt"
 	"io/ioutil"
 	"log"
-	"gopkg.in/yaml.v2"
 	"net/http"
-	"fmt"
 	"time"
-	"bytes"
+
+	"github.com/zoowii/query_api_proxy/cache"
+
 	"github.com/bitly/go-simplejson"
+	"gopkg.in/yaml.v2"
 )
 
 func ReadConfigFromYaml(yamlConfigFilePath string) (*Config, error) {
@@ -49,11 +52,15 @@ func writeDirectlyToResponse(w http.ResponseWriter, data []byte) {
 }
 
 type WorkerResponse struct {
-	Error error
-	Result []byte
-	ResultJSON *simplejson.Json
+	Error       error
+	Result      []byte
+	ResultJSON  *simplejson.Json
 	WorkerIndex int
-	WorkerUri string
+	WorkerUri   string
+}
+
+func isNeedCacheMethod(config *Config) bool {
+	return config.CacheAllJSONRpcMethods // TODO: judge by jsonrpc method name
 }
 
 // TODO: use config's logpath to log file
@@ -84,13 +91,35 @@ func StartServer(config *Config) {
 				}
 			}
 		}
+
 		responsesChannel := make(chan *WorkerResponse, len(config.Workers))
 		for workerIndex, workerUri := range config.Workers {
 			go func(workerIndex int, workerUri string) {
-				workerHttpRes, workerResErr := http.Post(workerUri, r.Header.Get("Content-Type"), bytes.NewReader(reqBody))
 				res := new(WorkerResponse)
 				res.WorkerIndex = workerIndex
 				res.WorkerUri = workerUri
+
+				cache1Key := workerUri
+				cache2Key := string(reqBody)
+				// because of there will not be any '^' in workerUri, so join cache1Key and cache2Key by '^'
+				cacheKey := cache1Key + "^" + cache2Key
+
+				if isNeedCacheMethod(config) {
+					if cacheValue, ok := cache.Get(cacheKey); ok {
+						resultBytes := cacheValue.([]byte)
+						resultJSON, jsonErr := simplejson.NewJson(resultBytes)
+						if jsonErr == nil {
+							res.Result = resultBytes
+							res.ResultJSON = resultJSON
+							// TODO: digest result json and when got > 1/2 same results, just break the loop
+							responsesChannel <- res
+							return
+						}
+					}
+				}
+
+				workerHttpRes, workerResErr := http.Post(workerUri, r.Header.Get("Content-Type"), bytes.NewReader(reqBody))
+
 				if workerResErr != nil {
 					res.Error = workerResErr
 				} else {
@@ -104,6 +133,10 @@ func StartServer(config *Config) {
 						if jsonErr == nil {
 							res.ResultJSON = resultJSON
 							// TODO: digest result json and when got > 1/2 same results, just break the loop
+							if isNeedCacheMethod(config) || IsSuccessJSONRpcResponse(resultJSON) {
+								cacheValue := readBytes
+								cache.SetWithDefaultExpire(cacheKey, cacheValue)
+							}
 						}
 					}
 				}
@@ -113,7 +146,7 @@ func StartServer(config *Config) {
 		timeout := false
 		breakIterWorkerResponses := false
 		workerResponses := make([]*WorkerResponse, 0)
-		for i:=0;i<len(config.Workers);i++ {
+		for i := 0; i < len(config.Workers); i++ {
 			if timeout {
 				break
 			}
@@ -139,9 +172,9 @@ func StartServer(config *Config) {
 			hasSomeErrorInWorkerResponses = true
 		}
 		type WorkerResponseSameGroup struct {
-			ResultJSON *simplejson.Json
+			ResultJSON  *simplejson.Json
 			ResultBytes []byte
-			Count int
+			Count       int
 		}
 		if config.ResponseWhenFirstGotResult && len(workerResponses) > 0 {
 			// find first not empty result json and final response
@@ -187,7 +220,7 @@ func StartServer(config *Config) {
 			writeErrorToJSONRpcResponse(w, rpcReqId, JSONRPC_INTERNAL_ERROR_CODE, "no responses until timeout")
 			return
 		}
-		if len(sameWorkerResponseGroups)>1 {
+		if len(sameWorkerResponseGroups) > 1 {
 			hasSomeErrorInWorkerResponses = true
 			log.Printf("workers send some distinct responses when dispath request %s\n", string(reqBody))
 		}
