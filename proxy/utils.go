@@ -15,24 +15,24 @@ const JSONRPC_INTERNAL_ERROR_CODE = -32603
 const JSONRPC_SERVER_ERROR_CODE_START = -32000 // [-32000, -32099]
 
 func MakeJSONRpcSuccessResponse(id interface{}, result interface{}) ([]byte, error) {
-	res := make(map[string]interface{})
-	res["jsonrpc"] = "2.0"
-	res["id"] = id
-	res["result"] = result
-	resBytes, err := json.Marshal(res)
+	res := simplejson.New()
+	res.Set("jsonrpc", "2.0")
+	res.Set("id", id)
+	res.Set("result", result)
+	resBytes, err := res.Encode()
 	return resBytes, err
 }
 
 func MakeJSONRpcErrorResponse(id interface{}, code int, message string, data interface{}) ([]byte, error) {
-	res := make(map[string]interface{})
-	res["jsonrpc"] = "2.0"
-	res["id"] = id
-	errorObj := make(map[string]interface{})
-	errorObj["code"] = code
-	errorObj["message"] = message
-	errorObj["data"] = data
-	res["error"] = errorObj
-	resBytes, err := json.Marshal(res)
+	res := simplejson.New()
+	res.Set("jsonrpc", "2.0")
+	res.Set("id", id)
+	errorObj := simplejson.New()
+	errorObj.Set("code", code)
+	errorObj.Set("message", message)
+	errorObj.Set("data", data)
+	res.Set("error", errorObj)
+	resBytes, err := res.Encode()
 	return resBytes, err
 }
 

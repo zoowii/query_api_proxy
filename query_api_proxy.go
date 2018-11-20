@@ -1,4 +1,4 @@
-package query_api_proxy
+package main
 
 import (
 	"os"

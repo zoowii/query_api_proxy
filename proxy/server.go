@@ -14,16 +14,13 @@ import (
 func ReadConfigFromYaml(yamlConfigFilePath string) (*Config, error) {
 	conf := new(Config)
 	yamlFile, err := ioutil.ReadFile(yamlConfigFilePath)
-	log.Println("yamlFile:", yamlFile)
 	if err != nil {
 		return nil, err
 	}
 	err = yaml.Unmarshal(yamlFile, conf)
-	// err = yaml.Unmarshal(yamlFile, &resultMap)
 	if err != nil {
 		return nil, err
 	}
-	log.Println("conf", conf)
 	return conf, nil
 }
 
@@ -45,6 +42,10 @@ func writeResultToJSONRpcResponse(w http.ResponseWriter, id interface{}, result 
 	}
 }
 
+func writeDirectlyToResponse(w http.ResponseWriter, data []byte) {
+	w.Write(data)
+}
+
 type WorkerResponse struct {
 	Error error
 	Result []byte
@@ -53,9 +54,10 @@ type WorkerResponse struct {
 	WorkerUri string
 }
 
+// TODO: use config's logpath to log file
 func StartServer(config *Config) {
 	proxyHandlerFunc := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if(r.Method != http.MethodPost) {
+		if r.Method != http.MethodPost {
 			// only support POST json-rpc now
 			writeErrorToJSONRpcResponse(w, 1, JSONRPC_PARSE_ERROR_CODE, "only support POST JSON-RPC now")
 			return
@@ -101,6 +103,7 @@ func StartServer(config *Config) {
 						}
 					}
 				}
+				responsesChannel <- res
 			}(workerIndex, workerUri)
 		}
 		timeout := false
@@ -142,7 +145,7 @@ func StartServer(config *Config) {
 			if group, foundGroup = sameWorkerResponseGroups[resultJSONDigest]; foundGroup {
 				group.Count += 1
 			} else {
-				group := new(WorkerResponseSameGroup)
+				group = new(WorkerResponseSameGroup)
 				group.ResultJSON = workerRes.ResultJSON
 				group.ResultBytes = workerRes.Result
 				group.Count = 1
@@ -156,6 +159,7 @@ func StartServer(config *Config) {
 				}
 			}
 		}
+
 		if len(sameWorkerResponseGroups) < 1 || maxCountGroup == nil {
 			hasSomeErrorInWorkerResponses = true
 			errMsg := fmt.Sprintf("workers send zero responses when dispatch request %s\n", string(reqBody))
@@ -170,11 +174,21 @@ func StartServer(config *Config) {
 		if hasSomeErrorInWorkerResponses {
 			log.Printf("some errors in worker responses when dispath request %s\n", string(reqBody))
 		}
-		writeResultToJSONRpcResponse(w, rpcReqId, maxCountGroup.ResultBytes)
+		writeDirectlyToResponse(w, maxCountGroup.ResultBytes)
 	})
+	var logRequest = func (handler http.Handler) http.Handler {
+		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			timer1 := time.NewTimer(time.Millisecond)
+			log.Printf("%s %s %s\n", r.RemoteAddr, r.Method, r.URL)
+			handler.ServeHTTP(w, r)
+			timer1.Stop()
+			usedTime := <- timer1.C
+			log.Printf("using %.2f seconds\n", (float64(usedTime.Nanosecond())*1.0/1000000000))
+		})
+	}
 	s := &http.Server{
 		Addr:           fmt.Sprintf("%s:%d", config.Host, config.Port),
-		Handler:        proxyHandlerFunc,
+		Handler:        logRequest(proxyHandlerFunc),
 		ReadTimeout:    50 * time.Second,
 		WriteTimeout:   100 * time.Second,
 		MaxHeaderBytes: 1 << 20,
