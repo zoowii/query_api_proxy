@@ -8,8 +8,6 @@ import (
 
 var cacheInstance = cache.New(5*time.Minute, 10*time.Minute)
 
-// TODO: make sure multithread safe or use lock
-
 func Set(key string, value interface{}, expireTimeDuration time.Duration) {
 	cacheInstance.Set(key, value, expireTimeDuration)
 }

@@ -9,6 +9,7 @@ app = Flask(__name__)
 
 @app.route("/", methods=["POST","GET"])
 def index():
+    print("api call hit")
     return Response(json.dumps({
         'jsonrpc': '2.0',
         'id': 1,

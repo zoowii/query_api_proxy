@@ -10,10 +10,16 @@ request_timeout_seconds: 100
 
 response_when_got_result: true
 
-cache_all_jsonrpc_methods: true
+cache_all_jsonrpc_methods: false
+
+cache_json_rpc_methods_with_black_list: true
+
+cache_jsonrpc_methods_blacklist:
+  - random
 
 jsonrpc_query_methods:
   - hello
   - queryJson
+  - random
 
 logpath: "./sample.log"

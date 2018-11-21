@@ -59,8 +59,19 @@ type WorkerResponse struct {
 	WorkerUri   string
 }
 
-func isNeedCacheMethod(config *Config) bool {
-	return config.CacheAllJSONRpcMethods // TODO: judge by jsonrpc method name
+func isNeedCacheMethod(config *Config, rpcReqMethod string) bool {
+	if config.CacheAllJSONRpcMethods {
+		return true
+	}
+	if config.CacheJSONRpcMethodsWithBlacklist {
+		for _, m := range config.CacheJSONRpcMethodsBlacklist {
+			if m == rpcReqMethod {
+				return false
+			}
+		}
+		return true
+	}
+	return false
 }
 
 // TODO: use config's logpath to log file
@@ -79,6 +90,7 @@ func StartServer(config *Config) {
 			return
 		}
 		var rpcReqId interface{} = 1
+		var rpcReqMethod string = ""
 		reqBodyJSON, err := simplejson.NewJson(reqBody)
 		if err == nil {
 			tryGetReqId, err := reqBodyJSON.Get("id").Int()
@@ -90,9 +102,17 @@ func StartServer(config *Config) {
 					rpcReqId = tryGetReqId
 				}
 			}
+			method, err := reqBodyJSON.Get("method").String()
+			if err == nil {
+				rpcReqMethod = method
+			} else {
+				writeErrorToJSONRpcResponse(w, 1, JSONRPC_INVALID_REQUEST_ERROR_CODE, err.Error())
+				return
+			}
 		}
 
 		responsesChannel := make(chan *WorkerResponse, len(config.Workers))
+		// TODO: when config.ResponseWhenFirstGotResult==true,dont'send all requests together, but one by one
 		for workerIndex, workerUri := range config.Workers {
 			go func(workerIndex int, workerUri string) {
 				res := new(WorkerResponse)
@@ -104,7 +124,7 @@ func StartServer(config *Config) {
 				// because of there will not be any '^' in workerUri, so join cache1Key and cache2Key by '^'
 				cacheKey := cache1Key + "^" + cache2Key
 
-				if isNeedCacheMethod(config) {
+				if isNeedCacheMethod(config, rpcReqMethod) {
 					if cacheValue, ok := cache.Get(cacheKey); ok {
 						resultBytes := cacheValue.([]byte)
 						resultJSON, jsonErr := simplejson.NewJson(resultBytes)
@@ -133,7 +153,7 @@ func StartServer(config *Config) {
 						if jsonErr == nil {
 							res.ResultJSON = resultJSON
 							// TODO: digest result json and when got > 1/2 same results, just break the loop
-							if isNeedCacheMethod(config) || IsSuccessJSONRpcResponse(resultJSON) {
+							if isNeedCacheMethod(config, rpcReqMethod) || IsSuccessJSONRpcResponse(resultJSON) {
 								cacheValue := readBytes
 								cache.SetWithDefaultExpire(cacheKey, cacheValue)
 							}
