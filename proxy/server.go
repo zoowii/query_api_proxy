@@ -4,13 +4,13 @@ import (
 	"bytes"
 	"fmt"
 	"io/ioutil"
-	"log"
 	"net/http"
 	"time"
 
 	"github.com/zoowii/query_api_proxy/cache"
 
 	"github.com/bitly/go-simplejson"
+	"github.com/zoowii/betterjson"
 	"gopkg.in/yaml.v2"
 )
 
@@ -74,9 +74,19 @@ func isNeedCacheMethod(config *Config, rpcReqMethod string) bool {
 	return false
 }
 
-// TODO: use config's logpath to log file
 // TODO: use jsonrpcmethods whitelist if enabled
+// TODO: fault handler
+// TODO: rate limit
 func StartServer(config *Config) {
+	if config.LogPath=="" {
+		config.LogPath = "./query_api_proxy.log"
+	}
+	logger, err := NewLogger(config.LogPath)
+	if err != nil {
+		panic("error happen when open log " + err.Error())
+		return
+	}
+	defer logger.Close()
 	proxyHandlerFunc := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodPost {
 			// only support POST json-rpc now
@@ -212,7 +222,7 @@ func StartServer(config *Config) {
 				hasSomeErrorInWorkerResponses = true
 				continue
 			}
-			resultJSONDigest := DigestJSONForEqual(workerRes.ResultJSON)
+			resultJSONDigest := betterjson.FromNotEmptySimpleJson(workerRes.ResultJSON).DigestJSONForEqual()
 			var group *WorkerResponseSameGroup
 			var foundGroup bool
 			if group, foundGroup = sameWorkerResponseGroups[resultJSONDigest]; foundGroup {
@@ -236,29 +246,30 @@ func StartServer(config *Config) {
 		if len(sameWorkerResponseGroups) < 1 || maxCountGroup == nil {
 			hasSomeErrorInWorkerResponses = true
 			errMsg := fmt.Sprintf("workers send zero responses when dispatch request %s\n", string(reqBody))
-			log.Print(errMsg)
+			logger.Print(errMsg)
 			writeErrorToJSONRpcResponse(w, rpcReqId, JSONRPC_INTERNAL_ERROR_CODE, "no responses until timeout")
 			return
 		}
 		if len(sameWorkerResponseGroups) > 1 {
 			hasSomeErrorInWorkerResponses = true
-			log.Printf("workers send some distinct responses when dispath request %s\n", string(reqBody))
+			logger.Printf("workers send some distinct responses when dispath request %s\n", string(reqBody))
 		}
 		if hasSomeErrorInWorkerResponses {
-			log.Printf("some errors in worker responses when dispath request %s\n", string(reqBody))
+			logger.Printf("some errors in worker responses when dispath request %s\n", string(reqBody))
 		}
 		writeDirectlyToResponse(w, maxCountGroup.ResultBytes)
 	})
-	//var logRequest = func (handler http.Handler) http.Handler {
-	//	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-	//		timer1 := time.NewTimer(time.Millisecond)
-	//		log.Printf("%s %s %s\n", r.RemoteAddr, r.Method, r.URL)
-	//		handler.ServeHTTP(w, r)
-	//		timer1.Stop()
-	//		usedTime := <- timer1.C
-	//		log.Printf("using %.2f seconds\n", (float64(usedTime.Nanosecond())*1.0/1000000000))
-	//	})
-	//}
+	var logRequest = func (handler http.Handler) http.Handler {
+		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			timer1 := time.NewTimer(time.Millisecond)
+			logger.Printf("%s %s %s\n", r.RemoteAddr, r.Method, r.URL)
+			handler.ServeHTTP(w, r)
+			timer1.Stop()
+			usedTime := <- timer1.C
+			logger.Printf("using %.2f seconds\n", (float64(usedTime.Nanosecond())*1.0/1000000000))
+		})
+	}
+	_ = logRequest
 	s := &http.Server{
 		Addr:           fmt.Sprintf("%s:%d", config.Host, config.Port),
 		Handler:        proxyHandlerFunc, // logRequest(proxyHandlerFunc),
@@ -267,6 +278,6 @@ func StartServer(config *Config) {
 		MaxHeaderBytes: 1 << 20,
 	}
 	s.SetKeepAlivesEnabled(false)
-	log.Printf("starting server at %s:%d", config.Host, config.Port)
-	log.Fatal(s.ListenAndServe())
+	logger.Printf("starting server at %s:%d\n", config.Host, config.Port)
+	logger.Fatal(s.ListenAndServe())
 }
