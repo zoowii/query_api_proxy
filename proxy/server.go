@@ -12,10 +12,11 @@ import (
 	"github.com/bitly/go-simplejson"
 	"github.com/zoowii/betterjson"
 	"gopkg.in/yaml.v2"
+	"sync/atomic"
 )
 
 func ReadConfigFromYaml(yamlConfigFilePath string) (*Config, error) {
-	conf := new(Config)
+	conf := NewConfig()
 	yamlFile, err := ioutil.ReadFile(yamlConfigFilePath)
 	if err != nil {
 		return nil, err
@@ -74,6 +75,80 @@ func isNeedCacheMethod(config *Config, rpcReqMethod string) bool {
 	return false
 }
 
+func useWorkerToProvideService(config *Config, workerIndex int, workerUri string, rpcReqMethod string, reqBody []byte) *WorkerResponse {
+	res := new(WorkerResponse)
+	res.WorkerIndex = workerIndex
+	res.WorkerUri = workerUri
+
+	cache1Key := workerUri
+	cache2Key := string(reqBody)
+	// because of there will not be any '^' in workerUri, so join cache1Key and cache2Key by '^'
+	cacheKey := cache1Key + "^" + cache2Key
+
+	if isNeedCacheMethod(config, rpcReqMethod) {
+		if cacheValue, ok := cache.Get(cacheKey); ok {
+			resultBytes := cacheValue.([]byte)
+			resultJSON, jsonErr := simplejson.NewJson(resultBytes)
+			if jsonErr == nil {
+				res.Result = resultBytes
+				res.ResultJSON = resultJSON
+				// TODO: digest result json and when got > 1/2 same results, just break the loop
+				return res
+			}
+		}
+	}
+
+	workerHttpRes, workerResErr := http.Post(workerUri, "application/json", bytes.NewReader(reqBody))
+
+	if workerResErr != nil {
+		res.Error = workerResErr
+	} else {
+		defer workerHttpRes.Body.Close()
+		readBytes, readErr := ioutil.ReadAll(workerHttpRes.Body)
+		if readErr != nil {
+			res.Error = readErr
+		} else {
+			res.Result = readBytes
+			resultJSON, jsonErr := simplejson.NewJson(readBytes)
+			if jsonErr == nil {
+				res.ResultJSON = resultJSON
+				// TODO: digest result json and when got > 1/2 same results, just break the loop
+				if isNeedCacheMethod(config, rpcReqMethod) || IsSuccessJSONRpcResponse(resultJSON) {
+					cacheValue := readBytes
+					cache.SetWithDefaultExpire(cacheKey, cacheValue)
+				}
+			}
+		}
+	}
+	return res
+}
+
+func selectWorkerToProvideService(config *Config, triedWorkerUris []string) (workerUri string, err error) {
+	// TODO
+	return "", nil
+}
+
+var workerLoadBalanceIndex uint32 = 0
+
+// teturns the order of workers according to the mode in the configuration
+func getWorkersSequenceBySelectMode(config *Config, workerUris []string) []string {
+	if config.IsMostOfAllSelectMode() || config.IsFirstOfAllSelectMode() {
+		return workerUris
+	} else if config.IsOnlyFirstSelectMode() ||  config.IsOnlyOnceSelectMode() {
+		firstIdx := atomic.AddUint32(&workerLoadBalanceIndex, 1)
+		firstIdx = firstIdx % uint32(len(workerUris))
+		newSeq := []string{workerUris[firstIdx]}
+		beforeWorkers := workerUris[0:firstIdx]
+		afterWorkers := workerUris[firstIdx+1:]
+		newSeq = append(newSeq, beforeWorkers...)
+		newSeq = append(newSeq, afterWorkers...)
+		return newSeq
+	} else {
+		panic("not supported config select_worker_mode")
+		return nil
+	}
+}
+
 // TODO: use jsonrpcmethods whitelist if enabled
 // TODO: fault handler
 // TODO: rate limit
@@ -122,68 +197,46 @@ func StartServer(config *Config) {
 		}
 
 		responsesChannel := make(chan *WorkerResponse, len(config.Workers))
-		// TODO: when config.ResponseWhenFirstGotResult==true,dont'send all requests together, but one by one
-		for workerIndex, workerUri := range config.Workers {
-			go func(workerIndex int, workerUri string) {
-				res := new(WorkerResponse)
-				res.WorkerIndex = workerIndex
-				res.WorkerUri = workerUri
-
-				cache1Key := workerUri
-				cache2Key := string(reqBody)
-				// because of there will not be any '^' in workerUri, so join cache1Key and cache2Key by '^'
-				cacheKey := cache1Key + "^" + cache2Key
-
-				if isNeedCacheMethod(config, rpcReqMethod) {
-					if cacheValue, ok := cache.Get(cacheKey); ok {
-						resultBytes := cacheValue.([]byte)
-						resultJSON, jsonErr := simplejson.NewJson(resultBytes)
-						if jsonErr == nil {
-							res.Result = resultBytes
-							res.ResultJSON = resultJSON
-							// TODO: digest result json and when got > 1/2 same results, just break the loop
-							responsesChannel <- res
-							return
-						}
-					}
+		// TODO: workers health check
+		workerUris := getWorkersSequenceBySelectMode(config, config.Workers)
+		if config.IsOnlyFirstSelectMode() {
+			// TODO: send request to workers one by one. now just send to all workers
+			for workerIndex, workerUri := range workerUris {
+				go func(workerIndex int, workerUri string) {
+					res := useWorkerToProvideService(config, workerIndex, workerUri, rpcReqMethod, reqBody)
+					responsesChannel <- res
+				}(workerIndex, workerUri)
+			}
+		} else {
+			for workerIndex, workerUri := range workerUris {
+				go func(workerIndex int, workerUri string) {
+					res := useWorkerToProvideService(config, workerIndex, workerUri, rpcReqMethod, reqBody)
+					responsesChannel <- res
+				}(workerIndex, workerUri)
+				if config.IsOnlyOnceSelectMode() {
+					break
 				}
-
-				workerHttpRes, workerResErr := http.Post(workerUri, r.Header.Get("Content-Type"), bytes.NewReader(reqBody))
-
-				if workerResErr != nil {
-					res.Error = workerResErr
-				} else {
-					defer workerHttpRes.Body.Close()
-					readBytes, readErr := ioutil.ReadAll(workerHttpRes.Body)
-					if readErr != nil {
-						res.Error = readErr
-					} else {
-						res.Result = readBytes
-						resultJSON, jsonErr := simplejson.NewJson(readBytes)
-						if jsonErr == nil {
-							res.ResultJSON = resultJSON
-							// TODO: digest result json and when got > 1/2 same results, just break the loop
-							if isNeedCacheMethod(config, rpcReqMethod) || IsSuccessJSONRpcResponse(resultJSON) {
-								cacheValue := readBytes
-								cache.SetWithDefaultExpire(cacheKey, cacheValue)
-							}
-						}
-					}
-				}
-				responsesChannel <- res
-			}(workerIndex, workerUri)
+			}
 		}
 		timeout := false
 		breakIterWorkerResponses := false
 		workerResponses := make([]*WorkerResponse, 0)
-		for i := 0; i < len(config.Workers); i++ {
+		for i := 0; i < len(workerUris); i++ {
 			if timeout {
 				break
 			}
 			select {
 			case res := <-responsesChannel:
 				workerResponses = append(workerResponses, res)
-				if config.ResponseWhenFirstGotResult && res.ResultJSON != nil {
+				if config.IsOnlyOnceSelectMode() {
+					breakIterWorkerResponses = true
+					break
+				}
+				if config.IsOnlyFirstSelectMode() && res.ResultJSON != nil {
+					breakIterWorkerResponses = true
+					break
+				}
+				if !config.IsMostOfAllSelectMode() && res.ResultJSON != nil {
 					breakIterWorkerResponses = true
 				}
 			case <-time.After(time.Duration(config.RequestTimeoutSeconds) * time.Second):
@@ -195,7 +248,7 @@ func StartServer(config *Config) {
 		}
 		// compare workerResponses to select most same responses
 		hasSomeErrorInWorkerResponses := false
-		if len(workerResponses) < len(config.Workers) {
+		if (config.IsFirstOfAllSelectMode() || config.IsMostOfAllSelectMode()) || len(workerResponses) < len(config.Workers) {
 			hasSomeErrorInWorkerResponses = true
 		}
 		if len(workerResponses) < 1 {
@@ -206,7 +259,7 @@ func StartServer(config *Config) {
 			ResultBytes []byte
 			Count       int
 		}
-		if config.ResponseWhenFirstGotResult && len(workerResponses) > 0 {
+		if !config.IsMostOfAllSelectMode() && len(workerResponses) > 0 {
 			// find first not empty result json and final response
 			for _, workerRes := range workerResponses {
 				if workerRes.ResultJSON != nil {

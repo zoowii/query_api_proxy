@@ -8,11 +8,16 @@ workers:
 
 request_timeout_seconds: 100
 
-response_when_got_result: true
-
 cache_all_jsonrpc_methods: false
 
 cache_json_rpc_methods_with_black_list: true
+
+# "fist_of_all", "most_of_all", "only_first", "only_once"
+# fist_of_all: send request to all workers and response first valid json-rpc result
+# most_of_all: send request to all workers and response most identical json-rpc result
+# only_first: send request to workers one by one(seq by load balancing) until response first valid json-rpc result
+# only_once: send request to only one worker selected by load balancing and response its result
+select_worker_mode: "only_first"
 
 cache_jsonrpc_methods_blacklist:
   - random

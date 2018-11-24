@@ -20,5 +20,11 @@ func main() {
 		os.Exit(2)
 		return
 	}
+	err = config.Validate()
+	if err != nil {
+		log.Fatal(err.Error())
+		os.Exit(3)
+		return
+	}
 	proxy.StartServer(config)
 }

@@ -54,3 +54,12 @@ func CheckFileExists(name string) bool {
 	}
 	return true
 }
+
+func ContainsString(strSlice []string, str string) bool {
+	for _, item := range strSlice {
+		if item == str {
+			return true
+		}
+	}
+	return false
+}
