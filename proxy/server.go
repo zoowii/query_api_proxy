@@ -9,10 +9,11 @@ import (
 
 	"github.com/zoowii/query_api_proxy/cache"
 
+	"sync/atomic"
+
 	"github.com/bitly/go-simplejson"
 	"github.com/zoowii/betterjson"
 	"gopkg.in/yaml.v2"
-	"sync/atomic"
 )
 
 func ReadConfigFromYaml(yamlConfigFilePath string) (*Config, error) {
@@ -50,14 +51,6 @@ func writeResultToJSONRpcResponse(w http.ResponseWriter, id interface{}, result 
 
 func writeDirectlyToResponse(w http.ResponseWriter, data []byte) {
 	w.Write(data)
-}
-
-type WorkerResponse struct {
-	Error       error
-	Result      []byte
-	ResultJSON  *simplejson.Json
-	WorkerIndex int
-	WorkerUri   string
 }
 
 func isNeedCacheMethod(config *Config, rpcReqMethod string) bool {
@@ -123,9 +116,41 @@ func useWorkerToProvideService(config *Config, workerIndex int, workerUri string
 	return res
 }
 
-func selectWorkerToProvideService(config *Config, triedWorkerUris []string) (workerUri string, err error) {
-	// TODO
-	return "", nil
+// send request to workers one by one. now just send to all workers
+func asyncTryWorkersUntilSuccess(config *Config, workerUris []string, startWorkerIndex int, responsesChannel chan *WorkerResponse,
+	rpcReqMethod string, reqBody []byte) {
+	if len(workerUris) <= startWorkerIndex {
+		return
+	}
+	go func() {
+		res := useWorkerToProvideService(config, startWorkerIndex, workerUris[startWorkerIndex], rpcReqMethod, reqBody)
+		if startWorkerIndex == (len(workerUris) - 1) {
+			responsesChannel <- res
+			return
+		}
+		if res.IsValidJSONRpcResult() {
+			responsesChannel <- res
+		} else {
+			asyncTryWorkersUntilSuccess(config, workerUris, startWorkerIndex+1, responsesChannel, rpcReqMethod, reqBody)
+		}
+	}()
+}
+
+func selectWorkersToProvideService(config *Config, workerUris []string,
+	responsesChannel chan *WorkerResponse, rpcReqMethod string, reqBody []byte) {
+	if config.IsOnlyFirstSelectMode() {
+		asyncTryWorkersUntilSuccess(config, workerUris, 0, responsesChannel, rpcReqMethod, reqBody)
+	} else {
+		for workerIndex, workerUri := range workerUris {
+			go func(workerIndex int, workerUri string) {
+				res := useWorkerToProvideService(config, workerIndex, workerUri, rpcReqMethod, reqBody)
+				responsesChannel <- res
+			}(workerIndex, workerUri)
+			if config.IsOnlyOnceSelectMode() {
+				break
+			}
+		}
+	}
 }
 
 var workerLoadBalanceIndex uint32 = 0
@@ -134,7 +159,7 @@ var workerLoadBalanceIndex uint32 = 0
 func getWorkersSequenceBySelectMode(config *Config, workerUris []string) []string {
 	if config.IsMostOfAllSelectMode() || config.IsFirstOfAllSelectMode() {
 		return workerUris
-	} else if config.IsOnlyFirstSelectMode() ||  config.IsOnlyOnceSelectMode() {
+	} else if config.IsOnlyFirstSelectMode() || config.IsOnlyOnceSelectMode() {
 		firstIdx := atomic.AddUint32(&workerLoadBalanceIndex, 1)
 		firstIdx = firstIdx % uint32(len(workerUris))
 		newSeq := []string{workerUris[firstIdx]}
@@ -152,8 +177,9 @@ func getWorkersSequenceBySelectMode(config *Config, workerUris []string) []strin
 // TODO: use jsonrpcmethods whitelist if enabled
 // TODO: fault handler
 // TODO: rate limit
+// TODO: workers health check
 func StartServer(config *Config) {
-	if config.LogPath=="" {
+	if config.LogPath == "" {
 		config.LogPath = "./query_api_proxy.log"
 	}
 	logger, err := NewLogger(config.LogPath)
@@ -197,27 +223,8 @@ func StartServer(config *Config) {
 		}
 
 		responsesChannel := make(chan *WorkerResponse, len(config.Workers))
-		// TODO: workers health check
 		workerUris := getWorkersSequenceBySelectMode(config, config.Workers)
-		if config.IsOnlyFirstSelectMode() {
-			// TODO: send request to workers one by one. now just send to all workers
-			for workerIndex, workerUri := range workerUris {
-				go func(workerIndex int, workerUri string) {
-					res := useWorkerToProvideService(config, workerIndex, workerUri, rpcReqMethod, reqBody)
-					responsesChannel <- res
-				}(workerIndex, workerUri)
-			}
-		} else {
-			for workerIndex, workerUri := range workerUris {
-				go func(workerIndex int, workerUri string) {
-					res := useWorkerToProvideService(config, workerIndex, workerUri, rpcReqMethod, reqBody)
-					responsesChannel <- res
-				}(workerIndex, workerUri)
-				if config.IsOnlyOnceSelectMode() {
-					break
-				}
-			}
-		}
+		selectWorkersToProvideService(config, workerUris, responsesChannel, rpcReqMethod, reqBody)
 		timeout := false
 		breakIterWorkerResponses := false
 		workerResponses := make([]*WorkerResponse, 0)
@@ -312,14 +319,14 @@ func StartServer(config *Config) {
 		}
 		writeDirectlyToResponse(w, maxCountGroup.ResultBytes)
 	})
-	var logRequest = func (handler http.Handler) http.Handler {
+	var logRequest = func(handler http.Handler) http.Handler {
 		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 			timer1 := time.NewTimer(time.Millisecond)
 			logger.Printf("%s %s %s\n", r.RemoteAddr, r.Method, r.URL)
 			handler.ServeHTTP(w, r)
 			timer1.Stop()
-			usedTime := <- timer1.C
-			logger.Printf("using %.2f seconds\n", (float64(usedTime.Nanosecond())*1.0/1000000000))
+			usedTime := <-timer1.C
+			logger.Printf("using %.2f seconds\n", (float64(usedTime.Nanosecond()) * 1.0 / 1000000000))
 		})
 	}
 	_ = logRequest
